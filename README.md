@@ -260,6 +260,8 @@ All messages are JSON objects carried in single UDP datagrams (maximum 4096 byte
   "type": "HEADING",
   "aircraft_id": "AC001",
   "heading": 212.5,
+  "seq": 1793236332007,
+  "timestamp": 1793236332.45,
   "hmac": "<hex digest>"
 }
 ```
@@ -296,6 +298,7 @@ Headings follow the convention: 0 degrees is +y, 90 degrees is +x, 180 degrees i
 - **Input validation.** Both the server and the aircraft validate message structure and value ranges before acting on them.
 - **Safe rendering.** The dashboard inserts database values using `textContent` rather than HTML.
 - **Network exposure.** All sockets and the web server bind to `127.0.0.1` only.
+- **Replay protection on commands.** Every heading command carries a strictly increasing `seq` and a `timestamp`, both covered by the HMAC. Aircraft reject commands that are older than 5 seconds or whose `seq` is not newer than the last accepted one.
 
 ## Database Schema
 
@@ -351,11 +354,14 @@ python test_udp.py
 
 ## Limitations
 
-- HMAC provides authentication and integrity, not confidentiality. Messages are sent in plaintext.
-- Heading commands carry no sequence number or timestamp, so a captured command could be replayed within the same key lifetime.
-- A single shared secret is used by all participants; there is no per-aircraft key or key rotation.
-- UDP offers no delivery or ordering guarantees; lost packets are simply skipped.
-- The server runs distance checks on every accepted update and opens a new database connection per query, which is simple but not optimized for scale.
-- Conflict avoidance is a simple geometric heuristic and does not guarantee resolution.
-- The dashboard is served by the Flask development server and is intended for local use only.
-- The model uses abstract units and does not represent real-world distances, altitudes, or aircraft performance.
+- **No confidentiality.** HMAC provides authentication and integrity only. All messages are sent in plaintext over UDP.
+- **Single shared secret.** All participants use the same key, so any holder of the key can sign messages for any aircraft. There is no per-aircraft key and no key rotation.
+- **Replay protection state is in memory.** The server keeps the last accepted position `seq` per aircraft in memory only. After a server restart, an old captured position packet could be accepted once. Conversely, if only the aircraft simulation is restarted, its counter starts again at 1 and the server rejects its updates until the counter exceeds the previously accepted value.
+- **Clock dependency for commands.** Heading commands are rejected when older than 5 seconds, which assumes the server and the aircraft share a reasonably synchronized clock. This holds here because both run on the same machine. Position updates carry no timestamp.
+- **Limited plausibility checks.** The server validates types and value ranges, but it does not check whether a reported position is physically plausible (for example, a jump larger than the aircraft's speed allows).
+- **Unreliable transport.** UDP offers no delivery or ordering guarantees. Lost packets are skipped and there are no retransmissions.
+- **Repeated warnings.** Distances are checked after every accepted update, and a warning row is stored each time a pair is below the limit. A single prolonged conflict therefore produces many warning entries. Avoidance commands, however, are rate-limited per pair.
+- **Simple avoidance logic.** Conflict resolution is a geometric heuristic (turn directly away from the other aircraft). It does not guarantee that a conflict is resolved and does not consider more than one other aircraft at a time.
+- **Local-only dashboard.** The dashboard runs on the Flask development server, has no authentication, and is bound to `127.0.0.1`. It is not suitable for production or network exposure.
+- **Single-host storage.** SQLite with one connection per thread is sufficient for this scale, but it is not designed for multiple hosts or high write rates. The WAL mode creates additional `-wal` and `-shm` files next to the database.
+- **Abstract model.** The simulation uses abstract units in a flat 2D plane. It does not represent real-world distances, altitude, wind, or aircraft performance.

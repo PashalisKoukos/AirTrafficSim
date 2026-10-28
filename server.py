@@ -21,7 +21,7 @@ from dataBase import (
     create_database,
     insert_initial_aircraft,
     update_aircraft_position,
-    get_aircraft,
+    get_all_aircraft,
     save_warning
 )
 
@@ -55,6 +55,12 @@ aircraft_addresses = {}
 # Time of the last avoidance command sent for each aircraft pair.
 last_avoidance_time = {}
 
+# Sequence counter for outgoing heading commands.
+# It starts from the current time in milliseconds, so it keeps
+# increasing even across server restarts, and aircraft can reject
+# any command whose seq is not newer than the last one they accepted.
+command_seq = time.time_ns() // 1_000_000
+
 # Identifiers of the simulated aircraft.
 AIRCRAFT_IDS = ["AC001", "AC002", "AC003", "AC004", "AC005"]
 
@@ -87,11 +93,19 @@ def send_avoidance_command(server_socket, aircraft, other_aircraft):
         # 0 deg = +y, 90 deg = +x, 180 deg = -y, 270 deg = -x.
         new_heading = math.degrees(math.atan2(dx, dy)) % 360
 
-    # Build the command message.
+    # Allocate the next command sequence number.
+    global command_seq
+    command_seq += 1
+
+    # Build the command message. The seq and timestamp fields are
+    # part of the signed data, so an attacker cannot change them,
+    # and a captured command cannot be replayed later.
     command = {
         "type": "HEADING",
         "aircraft_id": aircraft["aircraft_id"],
-        "heading": new_heading
+        "heading": new_heading,
+        "seq": command_seq,
+        "timestamp": time.time()
     }
 
     # Sign the command (create_hmac comes from security.py).
@@ -122,16 +136,12 @@ def check_aircraft_distances(server_socket):
     avoidance commands are sent to both of them.
     """
 
-    # Latest positions of all aircraft.
-    aircraft_positions = []
-
-    # Read each aircraft from the database.
-    for aircraft_id in AIRCRAFT_IDS:
-        aircraft = get_aircraft(aircraft_id)
-
-        # Keep only the aircraft that were found.
-        if aircraft is not None:
-            aircraft_positions.append(aircraft)
+    # Latest positions of all known aircraft, read with a single
+    # database query instead of one query per aircraft.
+    aircraft_positions = [
+        aircraft for aircraft in get_all_aircraft()
+        if aircraft["aircraft_id"] in AIRCRAFT_IDS
+    ]
 
     # Compare every pair of aircraft exactly once.
     for i in range(len(aircraft_positions)):

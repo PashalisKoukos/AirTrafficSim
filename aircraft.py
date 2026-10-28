@@ -30,6 +30,10 @@ PORT = 5000
 # Port on which heading commands are received.
 COMMAND_PORT = 5002
 
+# Maximum age (in seconds) of a command. Older commands are rejected,
+# which limits how long a captured command could be replayed.
+MAX_COMMAND_AGE = 5.0
+
 # Boundaries of the airspace in which the aircraft move.
 MIN_COORDINATE = 0.0
 MAX_COORDINATE = 100.0
@@ -43,7 +47,9 @@ def receive_commands(command_socket, aircraft_list):
     Process commands received from the server.
 
     The HMAC-SHA-256 signature is verified before any HEADING
-    command is applied.
+    command is applied. Each command must also carry a fresh
+    timestamp and a sequence number newer than the last accepted
+    one, which protects against replayed commands.
     """
 
     # Read every message that is currently waiting on the socket.
@@ -86,9 +92,11 @@ def receive_commands(command_socket, aircraft_list):
             if command.get("type") != "HEADING":
                 continue
 
-            # Read the target aircraft and the requested heading.
+            # Read the target aircraft, heading and anti-replay fields.
             aircraft_id = command.get("aircraft_id")
             heading = command.get("heading")
+            seq = command.get("seq")
+            timestamp = command.get("timestamp")
 
             # The heading must be a finite number in [0, 360).
             # Booleans are rejected explicitly because bool is a
@@ -102,9 +110,40 @@ def receive_commands(command_socket, aircraft_list):
                 print("Rejected: invalid heading command.")
                 continue
 
+            # The sequence number must be a positive integer
+            # (type(...) is int also rules out booleans).
+            if type(seq) is not int or seq < 1:
+                print("Rejected: invalid command seq.")
+                continue
+
+            # The timestamp must be a finite number.
+            if (
+                isinstance(timestamp, bool)
+                or not isinstance(timestamp, (int, float))
+                or not math.isfinite(timestamp)
+            ):
+                print("Rejected: invalid command timestamp.")
+                continue
+
+            # Reject commands that are too old (or from the future).
+            if abs(time.time() - timestamp) > MAX_COMMAND_AGE:
+                print("Rejected: command timestamp outside allowed window.")
+                continue
+
             # Find the aircraft the command is addressed to.
             for aircraft in aircraft_list:
                 if aircraft["aircraft_id"] == aircraft_id:
+
+                    # Reject old or repeated commands (replay protection).
+                    if seq <= aircraft["last_command_seq"]:
+                        print(
+                            f"Rejected stale/duplicate command for "
+                            f"{aircraft_id}: seq={seq}"
+                        )
+                        break
+
+                    # Remember the newest accepted command number.
+                    aircraft["last_command_seq"] = seq
 
                     # Apply the new heading to the simulation.
                     aircraft["heading"] = float(heading)
@@ -156,7 +195,10 @@ def run_simulation():
             "heading": float(aircraft["heading"]),
 
             # Each aircraft has its own increasing message counter.
-            "seq": 0
+            "seq": 0,
+
+            # Newest heading command accepted by this aircraft.
+            "last_command_seq": 0
         })
 
     # Socket used to send position updates.

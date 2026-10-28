@@ -21,8 +21,8 @@ import sqlite3
 
 from flask import Flask, render_template_string, jsonify
 
-# Reuse the database file name defined in dataBase.py.
-from dataBase import DB_NAME
+# Reuse the shared data access functions from dataBase.py.
+from dataBase import get_all_aircraft, get_recent_warnings
 
 
 # ------------------------------------------------
@@ -51,36 +51,8 @@ def get_aircraft_data():
     converted to JSON for the dashboard.
     """
 
-    connection = sqlite3.connect(DB_NAME)
-
-    # Allow each row to be converted to a dict keyed by column name.
-    connection.row_factory = sqlite3.Row
-
-    try:
-        cursor = connection.cursor()
-
-        # Select every field needed by the map and the flight table.
-        cursor.execute("""
-            SELECT
-                aircraft_id,
-                name,
-                x,
-                y,
-                speed,
-                heading,
-                origin,
-                destination,
-                manufacturer
-            FROM aircraft
-            ORDER BY aircraft_id
-        """)
-
-        # Convert the rows to regular Python dicts.
-        return [dict(row) for row in cursor.fetchall()]
-
-    finally:
-        # Always close the connection, even if an error occurs.
-        connection.close()
+    # The shared data layer reuses one connection per thread.
+    return get_all_aircraft()
 
 
 # ------------------------------------------------
@@ -91,28 +63,7 @@ def get_warning_data():
     Read the 20 most recent warnings stored by the server.
     """
 
-    connection = sqlite3.connect(DB_NAME)
-    connection.row_factory = sqlite3.Row
-
-    try:
-        cursor = connection.cursor()
-
-        cursor.execute("""
-            SELECT
-                warning_id,
-                aircraft_id_1,
-                aircraft_id_2,
-                distance,
-                timestamp
-            FROM warnings
-            ORDER BY warning_id DESC
-            LIMIT 20
-        """)
-
-        return [dict(row) for row in cursor.fetchall()]
-
-    finally:
-        connection.close()
+    return get_recent_warnings(20)
 
 
 # ------------------------------------------------
