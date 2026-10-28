@@ -1,4 +1,9 @@
 # AirTrafficSim (ATSP)
+![Python](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)
+![Flask](https://img.shields.io/badge/Flask-Dashboard-000000?logo=flask&logoColor=white)
+![SQLite](https://img.shields.io/badge/SQLite-Database-003B57?logo=sqlite&logoColor=white)
+![UDP](https://img.shields.io/badge/Protocol-UDP-blue)
+![HMAC](https://img.shields.io/badge/Security-HMAC--SHA256-green)
 
 A multi-component air traffic control simulation written in Python. Simulated aircraft broadcast their positions over UDP, a central server validates and stores those updates, detects loss of separation between aircraft, and issues avoidance commands. A web dashboard provides a live view of the airspace. All control and telemetry messages are authenticated with HMAC-SHA-256.
 
