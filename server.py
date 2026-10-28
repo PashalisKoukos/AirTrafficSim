@@ -1,32 +1,22 @@
-
 # ---------------------------------------------------------
 # server.py
-# UDP server για το σύστημα AirTrafficSim (ATSP).
+# UDP server of the AirTrafficSim (ATSP) system.
 #
-# Λειτουργίες:
-# - Παραλαβή ενημερώσεων θέσης αεροσκαφών.
-# - Επαλήθευση HMAC-SHA-256.
-# - Έλεγχος εγκυρότητας δεδομένων και αριθμού seq.
-# - Ενημέρωση της βάσης δεδομένων.
-# - Ανίχνευση μικρών αποστάσεων μεταξύ αεροσκαφών.
-# - Αποθήκευση προειδοποιήσεων και αποστολή εντολών αποφυγής.
+# Responsibilities:
+# - Receive aircraft position updates.
+# - Verify HMAC-SHA-256 signatures.
+# - Validate data and sequence numbers.
+# - Update the database.
+# - Detect aircraft that are too close to each other.
+# - Store warnings and send avoidance commands.
 # ---------------------------------------------------------
 
-# Η socket παρέχει την επικοινωνία μέσω UDP.
-import socket
-
-# Η json χρησιμοποιείται για την ανάγνωση και δημιουργία μηνυμάτων JSON.
 import json
-
-# Η math χρησιμοποιείται για μαθηματικούς υπολογισμούς και αποστάσεις.
 import math
-
-# Η time χρησιμοποιείται για τον χρονικό περιορισμό εντολών αποφυγής.
+import socket
 import time
 
-from security import create_hmac, verify_hmac
-
-# Εισάγουμε τις συναρτήσεις της βάσης δεδομένων.
+# Database functions.
 from dataBase import (
     create_database,
     insert_initial_aircraft,
@@ -35,249 +25,243 @@ from dataBase import (
     save_warning
 )
 
-# Εισάγουμε τη συνάρτηση επαλήθευσης της υπογραφής HMAC.
-from security import verify_hmac
+# HMAC helpers for signing commands and verifying position updates.
+from security import create_hmac, verify_hmac
 
 
-# Διεύθυνση IP στην οποία ακούει ο server.
+# IP address the server listens on.
 HOST = "127.0.0.1"
 
-# UDP θύρα για τις ενημερώσεις θέσης.
+# UDP port for position updates.
 PORT = 5000
 
-# Θύρα προορισμού για εντολές αλλαγής πορείας.
+# Destination port for heading commands sent to the aircraft.
 COMMAND_PORT = 5002
 
-# Αν η απόσταση είναι μικρότερη από αυτή την τιμή,
-# καταγράφεται προειδοποίηση και ζητείται αλλαγή πορείας.
-# Η τιμή είναι ενδεικτική για την εκπαιδευτική προσομοίωση.
+# If the distance between two aircraft is below this value,
+# a warning is stored and a heading change is requested.
+# The value is illustrative for this educational simulation.
 MIN_DISTANCE = 10.0
 
-# Ελάχιστος χρόνος ανάμεσα σε εντολές αποφυγής για το ίδιο ζεύγος.
+# Minimum time between avoidance commands for the same pair.
 AVOIDANCE_COOLDOWN = 3.0
 
-# Αποθηκεύουμε τον τελευταίο αποδεκτό αριθμό seq κάθε αεροσκάφους.
+# Last accepted sequence number of each aircraft.
 last_seq = {}
 
-# Αποθηκεύουμε τη διεύθυνση αποστολής κάθε αεροσκάφους.
+# Source address of each aircraft (used to send commands back).
 aircraft_addresses = {}
 
-# Αποθηκεύουμε την τελευταία χρονική στιγμή αποστολής εντολής αποφυγής.
+# Time of the last avoidance command sent for each aircraft pair.
 last_avoidance_time = {}
 
-# Τα αναγνωριστικά των αεροσκαφών της προσομοίωσης.
+# Identifiers of the simulated aircraft.
 AIRCRAFT_IDS = ["AC001", "AC002", "AC003", "AC004", "AC005"]
 
 
 def send_avoidance_command(server_socket, aircraft, other_aircraft):
     """
-    Στέλνει υπογεγραμμένη εντολή αλλαγής πορείας σε ένα αεροσκάφος.
+    Send a signed heading-change command to one aircraft.
 
-    Η εντολή υπογράφεται με HMAC-SHA-256, ώστε το αεροσκάφος
-    να μπορεί να ελέγξει την αυθεντικότητά της.
+    The command is signed with HMAC-SHA-256 so the aircraft
+    can verify its authenticity.
     """
 
-    # Βρίσκουμε τη διεύθυνση του αεροσκάφους.
+    # Look up the address the aircraft last sent data from.
     address = aircraft_addresses.get(aircraft["aircraft_id"])
 
-    # Αν δεν έχουμε διεύθυνση, δεν μπορούμε να στείλουμε εντολή.
+    # Without an address the command cannot be delivered.
     if address is None:
         return
 
-    # Υπολογίζουμε τη διαφορά των συντεταγμένων των αεροσκαφών.
+    # Difference between the coordinates of the two aircraft.
     dx = aircraft["x"] - other_aircraft["x"]
     dy = aircraft["y"] - other_aircraft["y"]
 
-    # Αν οι θέσεις τους είναι ίδιες, επιλέγουμε εναλλακτική πορεία.
+    # If both aircraft are at the same position, pick an
+    # alternative heading by turning 90 degrees.
     if dx == 0 and dy == 0:
         new_heading = (aircraft["heading"] + 90) % 360
     else:
-        # Υπολογίζουμε την κατεύθυνση απομάκρυνσης.
-        # 0° προς +y, 90° προς +x, 180° προς -y, 270° προς -x.
+        # Compute the direction pointing away from the other aircraft.
+        # 0 deg = +y, 90 deg = +x, 180 deg = -y, 270 deg = -x.
         new_heading = math.degrees(math.atan2(dx, dy)) % 360
 
-    # Δημιουργούμε το μήνυμα της εντολής.
+    # Build the command message.
     command = {
         "type": "HEADING",
         "aircraft_id": aircraft["aircraft_id"],
         "heading": new_heading
     }
 
-    # Δημιουργούμε HMAC υπογραφή για το μήνυμα.
-    # Η create_hmac βρίσκεται στο security.py.
+    # Sign the command (create_hmac comes from security.py).
     signature = create_hmac(command)
 
-    # Προσθέτουμε την υπογραφή στο μήνυμα.
+    # Attach the signature to the message.
     command["hmac"] = signature
 
-    # Μετατρέπουμε το μήνυμα σε JSON bytes.
+    # Serialize the message to JSON bytes.
     data = json.dumps(command).encode("utf-8")
 
-    # Στέλνουμε την υπογεγραμμένη εντολή στη θύρα του αεροσκάφους.
+    # Send the signed command to the aircraft's command port.
     command_address = (address[0], COMMAND_PORT)
     server_socket.sendto(data, command_address)
 
-    # Εμφανίζουμε την εντολή στην κονσόλα.
+    # Log the command to the console.
     print(
-        f"AVOIDANCE: Εντολή για {aircraft['aircraft_id']} "
-        f"-> νέα πορεία {new_heading:.1f}° (HMAC υπογεγραμμένο)"
+        f"AVOIDANCE: command for {aircraft['aircraft_id']} "
+        f"-> new heading {new_heading:.1f}° (HMAC signed)"
     )
 
 
 def check_aircraft_distances(server_socket):
     """
-    Ελέγχει τις αποστάσεις μεταξύ των αεροσκαφών.
+    Check the distances between all aircraft.
 
-    Αν δύο αεροσκάφη βρίσκονται πολύ κοντά, αποθηκεύει
-    προειδοποίηση και στέλνει εντολές αλλαγής πορείας.
+    If two aircraft are too close, a warning is stored and
+    avoidance commands are sent to both of them.
     """
 
-    # Δημιουργούμε λίστα με τις τελευταίες θέσεις των αεροσκαφών.
+    # Latest positions of all aircraft.
     aircraft_positions = []
 
-    # Διαβάζουμε κάθε αεροσκάφος από τη βάση δεδομένων.
+    # Read each aircraft from the database.
     for aircraft_id in AIRCRAFT_IDS:
         aircraft = get_aircraft(aircraft_id)
 
-        # Προσθέτουμε στη λίστα όσα αεροσκάφη βρέθηκαν.
+        # Keep only the aircraft that were found.
         if aircraft is not None:
             aircraft_positions.append(aircraft)
 
-    # Συγκρίνουμε κάθε ζεύγος αεροσκαφών μία φορά.
+    # Compare every pair of aircraft exactly once.
     for i in range(len(aircraft_positions)):
         for j in range(i + 1, len(aircraft_positions)):
 
             aircraft_a = aircraft_positions[i]
             aircraft_b = aircraft_positions[j]
 
-            # Υπολογίζουμε τις διαφορές των συντεταγμένων.
+            # Coordinate differences.
             dx = aircraft_a["x"] - aircraft_b["x"]
             dy = aircraft_a["y"] - aircraft_b["y"]
 
-            # Υπολογίζουμε την ευκλείδεια απόσταση.
+            # Euclidean distance.
             distance = math.sqrt(dx ** 2 + dy ** 2)
 
-            # Ελέγχουμε αν η απόσταση είναι μικρότερη από το όριο.
+            # Check whether the distance is below the limit.
             if distance < MIN_DISTANCE:
 
-                # Εμφανίζουμε την προειδοποίηση.
+                # Report the warning.
                 print(
-                    f"WARNING: Τα αεροσκάφη "
-                    f"{aircraft_a['aircraft_id']} και "
-                    f"{aircraft_b['aircraft_id']} βρίσκονται πολύ κοντά! "
-                    f"Απόσταση: {distance:.2f}"
+                    f"WARNING: aircraft "
+                    f"{aircraft_a['aircraft_id']} and "
+                    f"{aircraft_b['aircraft_id']} are too close! "
+                    f"Distance: {distance:.2f}"
                 )
 
-                # Αποθηκεύουμε την προειδοποίηση στη βάση.
+                # Store the warning in the database.
                 save_warning(
                     aircraft_a["aircraft_id"],
                     aircraft_b["aircraft_id"],
                     distance
                 )
 
-                # Δημιουργούμε σταθερό κλειδί για το ζεύγος αεροσκαφών.
+                # Build an order-independent key for the pair.
                 pair_key = tuple(sorted((
                     aircraft_a["aircraft_id"],
                     aircraft_b["aircraft_id"]
                 )))
 
-                # Διαβάζουμε τον τρέχοντα χρόνο.
+                # Current monotonic time.
                 now = time.monotonic()
 
-                # Βρίσκουμε πότε στάλθηκε η τελευταία εντολή για το ζεύγος.
+                # When was the last command sent for this pair?
                 previous_time = last_avoidance_time.get(pair_key, 0)
 
-                # Δεν στέλνουμε εντολές πιο συχνά από το επιτρεπόμενο όριο.
+                # Do not send commands more often than allowed.
                 if now - previous_time >= AVOIDANCE_COOLDOWN:
 
-                    # Ζητάμε από το πρώτο αεροσκάφος να απομακρυνθεί
-                    # από το δεύτερο.
+                    # Ask the first aircraft to move away from the second.
                     send_avoidance_command(
                         server_socket,
                         aircraft_a,
                         aircraft_b
                     )
 
-                    # Ζητάμε και από το δεύτερο να απομακρυνθεί
-                    # από το πρώτο.
+                    # Ask the second aircraft to move away from the first.
                     send_avoidance_command(
                         server_socket,
                         aircraft_b,
                         aircraft_a
                     )
 
-                    # Καταγράφουμε τον χρόνο αποστολής των εντολών.
+                    # Record the time the commands were sent.
                     last_avoidance_time[pair_key] = now
 
 
 def start_server():
     """
-    Αρχικοποιεί τη βάση και ξεκινά τον UDP server.
+    Initialize the database and run the UDP server.
     """
 
-    # Βεβαιωνόμαστε ότι υπάρχει η βάση δεδομένων.
+    # Make sure the database and the initial records exist.
     create_database()
-
-    # Βεβαιωνόμαστε ότι υπάρχουν οι αρχικές εγγραφές αεροσκαφών.
     insert_initial_aircraft()
 
-    # Δημιουργούμε το UDP socket του server.
+    # Create the UDP socket of the server.
     server_socket = socket.socket(
         socket.AF_INET,
         socket.SOCK_DGRAM
     )
 
-    # Συνδέουμε το socket με την IP και τη θύρα του server.
+    # Bind the socket to the server address and port.
     server_socket.bind((HOST, PORT))
 
     print(f"ATSP UDP Server listening on {HOST}:{PORT}")
     print(f"Command destination port: {COMMAND_PORT}")
-    print("Αναμονή μηνυμάτων θέσης με επαλήθευση HMAC-SHA-256...")
+    print("Waiting for position messages with HMAC-SHA-256 verification...")
 
     try:
-        # Ο server παραμένει ενεργός μέχρι να διακοπεί.
+        # Keep the server running until it is interrupted.
         while True:
 
-            # Παραλαμβάνουμε ένα UDP πακέτο και τη διεύθυνση αποστολέα.
+            # Receive one UDP packet and the sender's address.
             data, address = server_socket.recvfrom(4096)
 
             try:
-                # Μετατρέπουμε τα bytes σε κείμενο UTF-8.
+                # Decode the bytes as UTF-8 text.
                 message_text = data.decode("utf-8")
 
-                # Μετατρέπουμε το JSON σε λεξικό Python.
+                # Parse the JSON text into a Python object.
                 message = json.loads(message_text)
 
-                # Δεχόμαστε μόνο JSON αντικείμενα.
+                # Accept only JSON objects.
                 if not isinstance(message, dict):
-                    print("Rejected: το μήνυμα δεν είναι JSON object.")
+                    print("Rejected: message is not a JSON object.")
                     continue
 
-                # Διαβάζουμε την υπογραφή που έστειλε το αεροσκάφος.
+                # Read the signature sent by the aircraft.
                 received_signature = message.get("hmac")
 
-                # Δημιουργούμε αντίγραφο των δεδομένων χωρίς το πεδίο hmac.
-                # Η υπογραφή έχει υπολογιστεί πάνω στα υπόλοιπα πεδία.
+                # Copy the data without the hmac field. The signature
+                # was computed over the remaining fields.
                 message_to_verify = message.copy()
                 message_to_verify.pop("hmac", None)
 
-                # Ελέγχουμε την υπογραφή πριν χρησιμοποιήσουμε τα δεδομένα.
+                # Verify the signature before using any of the data.
                 if not verify_hmac(
                     message_to_verify,
                     received_signature
                 ):
-                    print(
-                        f"Rejected: αποτυχία HMAC από {address}."
-                    )
+                    print(f"Rejected: HMAC failure from {address}.")
                     continue
 
-                # Από αυτό το σημείο και μετά η υπογραφή είναι έγκυρη.
-                # Ελέγχουμε ότι το μήνυμα είναι ενημέρωση θέσης.
+                # The signature is valid from this point on.
+                # Check that the message is a position update.
                 if message_to_verify.get("type") != "POSITION":
-                    print("Rejected: μη υποστηριζόμενος τύπος μηνύματος.")
+                    print("Rejected: unsupported message type.")
                     continue
 
-                # Διαβάζουμε τα πεδία από το μήνυμα που επαληθεύτηκε.
+                # Read the fields from the verified message.
                 aircraft_id = message_to_verify.get("aircraft_id")
                 seq = message_to_verify.get("seq")
                 x = message_to_verify.get("x")
@@ -285,27 +269,26 @@ def start_server():
                 speed = message_to_verify.get("speed")
                 heading = message_to_verify.get("heading")
 
-                # Ελέγχουμε ότι το ID είναι μη κενό κείμενο.
+                # The ID must be a non-empty string.
                 if (
                     not isinstance(aircraft_id, str)
                     or not aircraft_id.strip()
                 ):
-                    print("Rejected: μη έγκυρο aircraft_id.")
+                    print("Rejected: invalid aircraft_id.")
                     continue
 
-                # Δεχόμαστε μόνο τα γνωστά αεροσκάφη.
+                # Accept only known aircraft.
                 if aircraft_id not in AIRCRAFT_IDS:
-                    print(f"Rejected: άγνωστο αεροσκάφος {aircraft_id}.")
+                    print(f"Rejected: unknown aircraft {aircraft_id}.")
                     continue
 
-                # Ελέγχουμε ότι το seq είναι θετικός ακέραιος.
-                # Το type(...) is int αποκλείει τις boolean τιμές.
+                # seq must be a positive integer. Using
+                # type(...) is int also rules out booleans.
                 if type(seq) is not int or seq < 1:
-                    print(f"Rejected: μη έγκυρο seq για {aircraft_id}.")
+                    print(f"Rejected: invalid seq for {aircraft_id}.")
                     continue
 
-                # Ελέγχουμε ότι οι αριθμητικές τιμές είναι αριθμοί
-                # και όχι boolean τιμές.
+                # The numeric fields must be numbers, not booleans.
                 numeric_values = (x, y, speed, heading)
 
                 if any(
@@ -314,63 +297,64 @@ def start_server():
                     for value in numeric_values
                 ):
                     print(
-                        f"Rejected: μη έγκυρα αριθμητικά δεδομένα "
-                        f"από {aircraft_id}."
+                        f"Rejected: invalid numeric data "
+                        f"from {aircraft_id}."
                     )
                     continue
 
-                # Μετατρέπουμε τις αριθμητικές τιμές σε float.
+                # Convert the numeric values to float.
                 x = float(x)
                 y = float(y)
                 speed = float(speed)
                 heading = float(heading)
 
-                # Απορρίπτουμε NaN και άπειρες τιμές.
+                # Reject NaN and infinite values.
                 if not all(
                     math.isfinite(value)
                     for value in (x, y, speed, heading)
                 ):
                     print(
-                        f"Rejected: μη πεπερασμένες τιμές από {aircraft_id}."
+                        f"Rejected: non-finite values from {aircraft_id}."
                     )
                     continue
 
-                # Ελέγχουμε ότι οι συντεταγμένες βρίσκονται στην περιοχή.
+                # The coordinates must lie inside the airspace.
                 if not (
                     0.0 <= x <= 100.0
                     and 0.0 <= y <= 100.0
                 ):
                     print(
-                        f"Rejected: θέση εκτός ορίων από {aircraft_id}."
+                        f"Rejected: position out of bounds "
+                        f"from {aircraft_id}."
                     )
                     continue
 
-                # Η ταχύτητα δεν επιτρέπεται να είναι αρνητική.
+                # Speed must not be negative.
                 if speed < 0:
                     print(
-                        f"Rejected: αρνητική ταχύτητα από {aircraft_id}."
+                        f"Rejected: negative speed from {aircraft_id}."
                     )
                     continue
 
-                # Ελέγχουμε ότι η πορεία βρίσκεται μεταξύ 0° και 360°.
+                # Heading must be between 0 and 360 degrees.
                 if not 0 <= heading <= 360:
                     print(
-                        f"Rejected: μη έγκυρη πορεία από {aircraft_id}."
+                        f"Rejected: invalid heading from {aircraft_id}."
                     )
                     continue
 
-                # Διαβάζουμε τον τελευταίο αποδεκτό αριθμό seq.
+                # Last accepted sequence number for this aircraft.
                 previous_seq = last_seq.get(aircraft_id, 0)
 
-                # Απορρίπτουμε παλιά ή επαναλαμβανόμενα πακέτα.
+                # Reject old or repeated packets (replay protection).
                 if seq <= previous_seq:
                     print(
                         f"Rejected stale/duplicate packet: {aircraft_id}, "
-                        f"seq={seq}, τελευταίο αποδεκτό seq={previous_seq}"
+                        f"seq={seq}, last accepted seq={previous_seq}"
                     )
                     continue
 
-                # Ενημερώνουμε τη βάση με την επαληθευμένη θέση.
+                # Update the database with the verified position.
                 success = update_aircraft_position(
                     aircraft_id,
                     x,
@@ -379,16 +363,16 @@ def start_server():
                     heading
                 )
 
-                # Συνεχίζουμε μόνο αν ενημερώθηκε επιτυχώς η βάση.
+                # Continue only if the database update succeeded.
                 if success:
 
-                    # Αποθηκεύουμε τον τελευταίο αποδεκτό αριθμό seq.
+                    # Remember the last accepted sequence number.
                     last_seq[aircraft_id] = seq
 
-                    # Κρατάμε τη διεύθυνση αποστολής για τις εντολές.
+                    # Remember the sender address for later commands.
                     aircraft_addresses[aircraft_id] = address
 
-                    # Εμφανίζουμε τα αποδεκτά δεδομένα.
+                    # Log the accepted data.
                     print(
                         f"Accepted {aircraft_id}: "
                         f"x={x:.2f}, y={y:.2f}, "
@@ -396,13 +380,13 @@ def start_server():
                         f"seq={seq}, HMAC=OK"
                     )
 
-                    # Ελέγχουμε τις αποστάσεις μετά την ενημέρωση.
+                    # Check distances after the update.
                     check_aircraft_distances(server_socket)
 
                 else:
-                    # Η ενημέρωση απέτυχε, π.χ. επειδή το ID
-                    # δεν υπάρχει στη βάση δεδομένων.
-                    print(f"Rejected: δεν ενημερώθηκε το {aircraft_id}.")
+                    # The update failed, for example because the
+                    # ID does not exist in the database.
+                    print(f"Rejected: {aircraft_id} was not updated.")
 
             except (
                 UnicodeDecodeError,
@@ -410,19 +394,18 @@ def start_server():
                 TypeError,
                 ValueError
             ):
-                # Αν το πακέτο δεν είναι έγκυρο, το απορρίπτουμε
-                # χωρίς να σταματήσει ολόκληρος ο server.
-                print(f"Rejected: κακοσχηματισμένο πακέτο από {address}.")
+                # Discard invalid packets without stopping the server.
+                print(f"Rejected: malformed packet from {address}.")
 
     except KeyboardInterrupt:
-        # Επιτρέπουμε τον ομαλό τερματισμό με Ctrl+C.
+        # Allow a clean shutdown with Ctrl+C.
         print("\nServer stopped.")
 
     finally:
-        # Κλείνουμε το socket όταν τερματιστεί ο server.
+        # Close the socket when the server stops.
         server_socket.close()
 
 
-# Εκκινούμε τον server μόνο όταν εκτελείται απευθείας το αρχείο.
+# Start the server only when this file is run directly.
 if __name__ == "__main__":
     start_server()

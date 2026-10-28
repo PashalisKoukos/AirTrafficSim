@@ -1,69 +1,65 @@
-import json
-import socket
-
 # ================================================================
-# AirTrafficSim — Air Traffic Control Dashboard
+# app.py
+# AirTrafficSim - Air Traffic Control Dashboard
 # ================================================================
-# Τι προσφέρει αυτή η εφαρμογή:
-# 1. Εμφανίζει έναν σύγχρονο πίνακα ελέγχου εναέριας κυκλοφορίας.
-# 2. Διαβάζει τις θέσεις των αεροσκαφών από τη βάση SQLite.
-# 3. Σχεδιάζει τα αεροσκάφη σε έναν δυναμικό δισδιάστατο χάρτη.
-# 4. Υπολογίζει τις τρέχουσες αποστάσεις μεταξύ των αεροσκαφών.
-# 5. Επισημαίνει με κόκκινο χρώμα τα αεροσκάφη σε κίνδυνο.
-# 6. Εμφανίζει στατιστικά, στοιχεία πτήσεων και προειδοποιήσεις.
-# 7. Ανανεώνει αυτόματα την οθόνη κάθε δύο δευτερόλεπτα.
+# What this application provides:
+# 1. A modern air traffic control dashboard.
+# 2. Aircraft positions read from the SQLite database.
+# 3. A dynamic two-dimensional airspace map.
+# 4. Live distance calculation between aircraft.
+# 5. Red highlighting of aircraft currently in danger.
+# 6. Statistics, flight details and warning history.
+# 7. Automatic refresh every two seconds.
 #
-# Σημαντικό:
-# Η εφαρμογή χρησιμοποιεί το υπάρχον dataBase.py και τη βάση
-# airtraffic.db. Δεν αντικαθιστά τον UDP server ή την προσομοίωση.
+# Note:
+# This app reuses dataBase.py and airtraffic.db. It does not
+# replace the UDP server or the aircraft simulation.
 # ================================================================
+
+import math
+import sqlite3
 
 from flask import Flask, render_template_string, jsonify
-import sqlite3
-import math
 
-# Εισάγουμε το όνομα της βάσης από το υπάρχον αρχείο μας.
+# Reuse the database file name defined in dataBase.py.
 from dataBase import DB_NAME
 
 
 # ------------------------------------------------
-# 1. Ρυθμίσεις εφαρμογής
+# 1. Application settings
 # ------------------------------------------------
 
-# Δημιουργούμε την εφαρμογή Flask.
+# Create the Flask application.
 app = Flask(__name__)
 
-# Ελάχιστη επιτρεπόμενη απόσταση σε μονάδες του μοντέλου.
-# Πρέπει να συμφωνεί με το MIN_DISTANCE του server.py.
+# Minimum allowed distance in model units.
+# Must match MIN_DISTANCE in server.py.
 MIN_DISTANCE = 10.0
 
-# Διάστημα αυτόματης ανανέωσης σε χιλιοστά του δευτερολέπτου.
+# Automatic refresh interval in milliseconds.
 REFRESH_INTERVAL = 2000
 
 
 # ------------------------------------------------
-# 2. Ανάγνωση δεδομένων αεροσκαφών από τη SQLite
+# 2. Read aircraft data from SQLite
 # ------------------------------------------------
 def get_aircraft_data():
     """
-    Διαβάζει τα στοιχεία όλων των αεροσκαφών από τη βάση.
+    Read all aircraft from the database.
 
-    Επιστρέφει μια λίστα από λεξικά, ώστε τα δεδομένα να
-    μπορούν να μετατραπούν εύκολα σε JSON για το dashboard.
+    Returns a list of dicts so the data can be easily
+    converted to JSON for the dashboard.
     """
 
-    # Ανοίγουμε σύνδεση με τη βάση δεδομένων.
     connection = sqlite3.connect(DB_NAME)
 
-    # Κάθε γραμμή θα μπορεί να μετατραπεί σε λεξικό
-    # με κλειδιά τα ονόματα των στηλών.
+    # Allow each row to be converted to a dict keyed by column name.
     connection.row_factory = sqlite3.Row
 
     try:
         cursor = connection.cursor()
 
-        # Διαβάζουμε όλα τα πεδία που χρειαζόμαστε
-        # για τον χάρτη και τον πίνακα πτήσεων.
+        # Select every field needed by the map and the flight table.
         cursor.execute("""
             SELECT
                 aircraft_id,
@@ -79,21 +75,20 @@ def get_aircraft_data():
             ORDER BY aircraft_id
         """)
 
-        # Μετατρέπουμε τις γραμμές σε κανονικά λεξικά Python.
+        # Convert the rows to regular Python dicts.
         return [dict(row) for row in cursor.fetchall()]
 
     finally:
-        # Κλείνουμε πάντα τη σύνδεση, ακόμη κι αν παρουσιαστεί σφάλμα.
+        # Always close the connection, even if an error occurs.
         connection.close()
 
 
 # ------------------------------------------------
-# 3. Ανάγνωση ιστορικών προειδοποιήσεων από τη SQLite
+# 3. Read warning history from SQLite
 # ------------------------------------------------
 def get_warning_data():
     """
-    Διαβάζει τις 20 πιο πρόσφατες προειδοποιήσεις που
-    αποθηκεύτηκαν από τον server.
+    Read the 20 most recent warnings stored by the server.
     """
 
     connection = sqlite3.connect(DB_NAME)
@@ -121,38 +116,37 @@ def get_warning_data():
 
 
 # ------------------------------------------------
-# 4. Υπολογισμός τρέχουσας απόστασης μεταξύ αεροσκαφών
+# 4. Compute current distances between aircraft
 # ------------------------------------------------
 def calculate_active_conflicts(aircraft):
     """
-    Ελέγχει όλες τις δυνατές δυάδες αεροσκαφών.
+    Check every possible pair of aircraft.
 
-    Αν η απόσταση δύο αεροσκαφών είναι μικρότερη από
-    MIN_DISTANCE, καταγράφει ένα ενεργό περιστατικό.
+    If the distance between two aircraft is below MIN_DISTANCE,
+    an active conflict is recorded.
 
-    Ο έλεγχος γίνεται με τις τρέχουσες θέσεις της βάσης.
-    Δεν χρησιμοποιούμε το ιστορικό προειδοποιήσεων για να
-    αποφασίσουμε αν υπάρχει κίνδυνος αυτή τη στιγμή.
+    The check uses the current positions from the database.
+    The warning history is not used to decide whether a
+    conflict is active right now.
     """
 
     conflicts = []
 
-    # Εξετάζουμε κάθε ζεύγος μία φορά, χωρίς διπλές συγκρίσεις.
+    # Examine each pair once, without duplicate comparisons.
     for i in range(len(aircraft)):
         for j in range(i + 1, len(aircraft)):
 
             plane_a = aircraft[i]
             plane_b = aircraft[j]
 
-            # Υπολογίζουμε τη διαφορά των συντεταγμένων.
+            # Coordinate differences.
             dx = float(plane_a["x"]) - float(plane_b["x"])
             dy = float(plane_a["y"]) - float(plane_b["y"])
 
-            # Ευκλείδεια απόσταση στο δισδιάστατο επίπεδο.
+            # Euclidean distance in the plane.
             distance = math.sqrt(dx * dx + dy * dy)
 
-            # Αν η απόσταση είναι μικρότερη από το όριο,
-            # θεωρούμε ότι υπάρχει ενεργό περιστατικό.
+            # Below the limit means an active conflict.
             if distance < MIN_DISTANCE:
                 conflicts.append({
                     "aircraft_id_1": plane_a["aircraft_id"],
@@ -162,28 +156,28 @@ def calculate_active_conflicts(aircraft):
 
     return conflicts
 
+
 # ------------------------------------------------
-# 5. API που παρέχει όλα τα δεδομένα στο dashboard
+# 5. API providing all data to the dashboard
 # ------------------------------------------------
 @app.route("/api/state")
 def api_state():
     """
-    Επιστρέφει τα δεδομένα σε μορφή JSON.
+    Return the dashboard data as JSON.
 
-    Το JavaScript του browser καλεί αυτή τη διεύθυνση
-    κάθε δύο δευτερόλεπτα για να ενημερώνει την οθόνη.
+    The browser JavaScript calls this endpoint every two
+    seconds to refresh the screen.
     """
 
     try:
-        # Διαβάζουμε τα πιο πρόσφατα δεδομένα από τη βάση.
+        # Read the latest data from the database.
         aircraft = get_aircraft_data()
         warnings = get_warning_data()
 
-        # Υπολογίζουμε τον πραγματικό τρέχοντα κίνδυνο
-        # από τις θέσεις που διαβάσαμε.
+        # Compute the real current danger from the positions.
         conflicts = calculate_active_conflicts(aircraft)
 
-        # Το jsonify μετατρέπει το λεξικό Python σε JSON.
+        # jsonify converts the Python dict to a JSON response.
         return jsonify({
             "aircraft": aircraft,
             "warnings": warnings,
@@ -192,39 +186,38 @@ def api_state():
         })
 
     except sqlite3.Error:
-        # Αν παρουσιαστεί πρόβλημα με τη βάση, στέλνουμε
-        # μήνυμα σφάλματος στον browser με HTTP 500.
-        app.logger.exception("Σφάλμα ανάγνωσης της βάσης δεδομένων")
+        # On a database problem, return an HTTP 500 error message.
+        app.logger.exception("Error reading the database")
 
         return jsonify({
-            "error": "Δεν ήταν δυνατή η ανάγνωση της βάσης δεδομένων."
+            "error": "The database could not be read."
         }), 500
 
 
 # ------------------------------------------------
-# 6. Κεντρική σελίδα του dashboard
+# 6. Main dashboard page
 # ------------------------------------------------
 @app.route("/")
 def dashboard():
 
-    # Το HTML, το CSS και το JavaScript βρίσκονται εδώ μέσα,
-    # ώστε να συνεχίσουμε να χρησιμοποιούμε μόνο το app.py.
+    # The HTML, CSS and JavaScript are embedded here so the
+    # whole dashboard lives in a single Python file.
     return render_template_string(r"""
 <!DOCTYPE html>
-<html lang="el">
+<html lang="en">
 
 <head>
     <meta charset="UTF-8">
 
-    <!-- Ο τίτλος της καρτέλας του browser. -->
-    <title>AirTrafficSim | Κέντρο Ελέγχου</title>
+    <!-- Browser tab title. -->
+    <title>AirTrafficSim | Control Center</title>
 
-    <!-- Βελτιώνει την εμφάνιση σε κινητά και μικρές οθόνες. -->
+    <!-- Improves rendering on phones and small screens. -->
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
     <style>
         /* ----------------------------------------------------
-           ΒΑΣΙΚΕΣ ΡΥΘΜΙΣΕΙΣ ΚΑΙ ΧΡΩΜΑΤΙΚΟ ΘΕΜΑ
+           BASE SETTINGS AND COLOR THEME
            ---------------------------------------------------- */
 
         :root {
@@ -253,7 +246,7 @@ def dashboard():
             font-size: 14px;
         }
 
-        /* Κεντρική στήλη περιεχομένου. */
+        /* Central content column. */
         .container {
             width: min(1500px, 100%);
             margin: 0 auto;
@@ -261,7 +254,7 @@ def dashboard():
         }
 
         /* ----------------------------------------------------
-           ΚΕΦΑΛΙΔΑ
+           HEADER
            ---------------------------------------------------- */
 
         .topbar {
@@ -272,23 +265,6 @@ def dashboard():
             flex-wrap: wrap;
             padding-bottom: 22px;
             border-bottom: 1px solid var(--border);
-        }
-
-        .brand {
-            display: flex;
-            align-items: center;
-            gap: 15px;
-        }
-
-        .brand-icon {
-            display: grid;
-            place-items: center;
-            width: 54px;
-            height: 54px;
-            border-radius: 15px;
-            background: #172d49;
-            border: 1px solid #2d527d;
-            font-size: 28px;
         }
 
         .brand h1 {
@@ -332,22 +308,8 @@ def dashboard():
         }
 
         /* ----------------------------------------------------
-           ΤΙΤΛΟΙ ΕΝΟΤΗΤΩΝ
+           SECTION HEADINGS
            ---------------------------------------------------- */
-
-        .section-heading {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            flex-wrap: wrap;
-            gap: 12px;
-            margin: 28px 0 15px;
-        }
-
-        .section-heading h2 {
-            margin: 0;
-            font-size: 17px;
-        }
 
         .subheading {
             margin: 6px 0 0;
@@ -365,7 +327,7 @@ def dashboard():
         }
 
         /* ----------------------------------------------------
-           ΚΑΡΤΕΣ ΣΤΑΤΙΣΤΙΚΩΝ
+           STATISTICS CARDS
            ---------------------------------------------------- */
 
         .stats {
@@ -384,6 +346,7 @@ def dashboard():
             border-radius: 14px;
         }
 
+        /* Colored accent line at the top of each card. */
         .stat-card::after {
             content: "";
             position: absolute;
@@ -413,7 +376,7 @@ def dashboard():
         }
 
         /* ----------------------------------------------------
-           ΚΟΙΝΗ ΕΜΦΑΝΙΣΗ ΤΩΝ ΠΛΑΙΣΙΩΝ
+           COMMON PANEL STYLE
            ---------------------------------------------------- */
 
         .panel {
@@ -439,10 +402,6 @@ def dashboard():
             font-size: 15px;
         }
 
-        .panel-body {
-            padding: 18px;
-        }
-
         .small-label {
             color: var(--muted);
             font-size: 11px;
@@ -461,7 +420,7 @@ def dashboard():
         }
 
         /* ----------------------------------------------------
-           ΧΑΡΤΗΣ ΕΝΑΕΡΙΟΥ ΧΩΡΟΥ
+           AIRSPACE MAP
            ---------------------------------------------------- */
 
         .map-panel {
@@ -512,7 +471,7 @@ def dashboard():
         }
 
         /* ----------------------------------------------------
-           ΠΙΝΑΚΕΣ
+           TABLES
            ---------------------------------------------------- */
 
         .tables-grid {
@@ -602,7 +561,7 @@ def dashboard():
         }
 
         /* ----------------------------------------------------
-           ΥΠΟΣΕΛΙΔΟ
+           FOOTER
            ---------------------------------------------------- */
 
         .footer {
@@ -618,7 +577,7 @@ def dashboard():
         }
 
         /* ----------------------------------------------------
-           ΠΡΟΣΑΡΜΟΓΗ ΓΙΑ ΜΙΚΡΟΤΕΡΕΣ ΟΘΟΝΕΣ
+           RESPONSIVE LAYOUT FOR SMALLER SCREENS
            ---------------------------------------------------- */
 
         @media (max-width: 950px) {
@@ -647,11 +606,6 @@ def dashboard():
             .stat-value {
                 font-size: 26px;
             }
-
-            .brand-icon {
-                width: 45px;
-                height: 45px;
-            }
         }
     </style>
 </head>
@@ -659,73 +613,69 @@ def dashboard():
 <body>
 <div class="container">
 
-    <!-- Κεντρική κεφαλίδα της εφαρμογής. -->
+    <!-- Main application header. -->
     <header class="topbar">
         <div class="brand">
-            <div class="brand-icon">✈</div>
-
-            <div>
-                <div class="eyebrow">Air Traffic Monitoring System</div>
-                <h1>AirTrafficSim</h1>
-                <p>Κέντρο παρακολούθησης εναέριας κυκλοφορίας</p>
-            </div>
+            <div class="eyebrow">Air Traffic Monitoring System</div>
+            <h1>AirTrafficSim</h1>
+            <p>Air traffic monitoring center</p>
         </div>
 
-        <!-- Η JavaScript ενημερώνει αυτή την ένδειξη σύνδεσης. -->
+        <!-- The JavaScript updates this connection indicator. -->
         <div id="connection" class="connection">
             <span class="connection-dot"></span>
-            <span id="connection-text">Έλεγχος σύνδεσης...</span>
+            <span id="connection-text">Checking connection...</span>
         </div>
     </header>
 
 
     <!-- ------------------------------------------------------
-         ΚΑΡΤΕΣ ΣΤΑΤΙΣΤΙΚΩΝ
+         STATISTICS CARDS
          ------------------------------------------------------ -->
     <section class="stats">
 
         <div class="stat-card" style="--accent: #55a7ff;">
-            <div class="stat-label">ΣΥΝΟΛΟ ΑΕΡΟΣΚΑΦΩΝ</div>
-            <div class="stat-value" id="total-aircraft">—</div>
-            <div class="stat-note">Αεροσκάφη στη βάση δεδομένων</div>
+            <div class="stat-label">TOTAL AIRCRAFT</div>
+            <div class="stat-value" id="total-aircraft">-</div>
+            <div class="stat-note">Aircraft in the database</div>
         </div>
 
         <div class="stat-card" style="--accent: #35d49a;">
-            <div class="stat-label">ΚΑΝΟΝΙΚΗ ΚΑΤΑΣΤΑΣΗ</div>
-            <div class="stat-value" id="safe-aircraft">—</div>
-            <div class="stat-note">Χωρίς ενεργή προειδοποίηση</div>
+            <div class="stat-label">NORMAL STATUS</div>
+            <div class="stat-value" id="safe-aircraft">-</div>
+            <div class="stat-note">No active warning</div>
         </div>
 
         <div class="stat-card" style="--accent: #ff5d73;">
-            <div class="stat-label">ΑΕΡΟΣΚΑΦΗ ΣΕ ΚΙΝΔΥΝΟ</div>
-            <div class="stat-value" id="danger-aircraft">—</div>
-            <div class="stat-note">Με συμμετοχή σε ενεργή σύγκρουση απόστασης</div>
+            <div class="stat-label">AIRCRAFT IN DANGER</div>
+            <div class="stat-value" id="danger-aircraft">-</div>
+            <div class="stat-note">Involved in an active separation conflict</div>
         </div>
 
         <div class="stat-card" style="--accent: #ffc766;">
-            <div class="stat-label">ΕΝΕΡΓΑ ΠΕΡΙΣΤΑΤΙΚΑ</div>
-            <div class="stat-value" id="active-conflicts">—</div>
-            <div class="stat-note">Ζεύγη κάτω από το όριο απόστασης</div>
+            <div class="stat-label">ACTIVE CONFLICTS</div>
+            <div class="stat-value" id="active-conflicts">-</div>
+            <div class="stat-note">Pairs below the distance limit</div>
         </div>
 
     </section>
 
 
     <!-- ------------------------------------------------------
-         ΜΕΓΑΛΟΣ ΔΥΝΑΜΙΚΟΣ ΧΑΡΤΗΣ
+         LARGE DYNAMIC MAP
          ------------------------------------------------------ -->
     <section class="panel map-panel">
 
         <div class="panel-header">
             <div>
-                <h2>Χάρτης εναέριου χώρου</h2>
+                <h2>Airspace map</h2>
                 <p class="subheading">
-                    Ζωντανή απεικόνιση θέσεων και κατευθύνσεων πτήσης
+                    Live view of aircraft positions and headings
                 </p>
             </div>
 
             <div class="tag">
-                <span style="color: #35d49a;">●</span>
+                <span style="color: #35d49a;">&#9679;</span>
                 LIVE MONITORING
             </div>
         </div>
@@ -734,7 +684,7 @@ def dashboard():
             <canvas id="airspace-canvas"
                     width="1100"
                     height="510">
-                Ο browser δεν υποστηρίζει το Canvas.
+                Your browser does not support the Canvas element.
             </canvas>
         </div>
 
@@ -742,23 +692,23 @@ def dashboard():
             <div class="legend">
                 <div class="legend-item">
                     <span class="legend-dot" style="background:#35d49a;"></span>
-                    Κανονική κατάσταση
+                    Normal status
                 </div>
 
                 <div class="legend-item">
                     <span class="legend-dot" style="background:#ff5d73;"></span>
-                    Ενεργός κίνδυνος
+                    Active danger
                 </div>
 
                 <div class="legend-item">
                     <span class="legend-dot" style="background:#55a7ff;"></span>
-                    Κατεύθυνση κίνησης
+                    Direction of movement
                 </div>
             </div>
 
             <div class="small-label">
-                Όριο ασφαλείας:
-                <strong id="distance-limit">10.0</strong> μονάδες
+                Safety limit:
+                <strong id="distance-limit">10.0</strong> units
             </div>
         </div>
 
@@ -766,40 +716,40 @@ def dashboard():
 
 
     <!-- ------------------------------------------------------
-         ΠΙΝΑΚΑΣ ΠΤΗΣΕΩΝ ΚΑΙ ΠΡΟΕΙΔΟΠΟΙΗΣΕΩΝ
+         FLIGHT TABLE AND WARNING HISTORY
          ------------------------------------------------------ -->
     <section class="tables-grid">
 
         <div class="panel">
             <div class="panel-header">
                 <div>
-                    <h2>Κατάσταση πτήσεων</h2>
-                    <p class="subheading">Θέση, ταχύτητα και διαδρομή κάθε αεροσκάφους</p>
+                    <h2>Flight status</h2>
+                    <p class="subheading">Position, speed and route of each aircraft</p>
                 </div>
 
-                <span class="tag" id="flight-count">0 πτήσεις</span>
+                <span class="tag" id="flight-count">0 flights</span>
             </div>
 
             <div class="table-wrap">
                 <table>
                     <thead>
                     <tr>
-                            <th>Αεροσκάφος</th>
-                            <th>Κατασκευαστής</th>
-                            <th>Προέλευση</th>
-                            <th>Προορισμός</th>
-                            <th>Διαδρομή</th>
-                            <th>Θέση X / Y</th>
-                            <th>Ταχύτητα</th>
-                            <th>Πορεία</th>
-                            <th>Κατάσταση</th>
+                        <th>Aircraft</th>
+                        <th>Manufacturer</th>
+                        <th>Origin</th>
+                        <th>Destination</th>
+                        <th>Route</th>
+                        <th>Position X / Y</th>
+                        <th>Speed</th>
+                        <th>Heading</th>
+                        <th>Status</th>
                     </tr>
                     </thead>
 
                     <tbody id="aircraft-body">
                         <tr>
                             <td colspan="9" class="empty-message">
-                                Φόρτωση δεδομένων...
+                                Loading data...
                             </td>
                         </tr>
                     </tbody>
@@ -811,27 +761,27 @@ def dashboard():
         <div class="panel">
             <div class="panel-header">
                 <div>
-                    <h2>Ιστορικό προειδοποιήσεων</h2>
-                    <p class="subheading">Οι τελευταίες καταχωρίσεις του server</p>
+                    <h2>Warning history</h2>
+                    <p class="subheading">Latest entries recorded by the server</p>
                 </div>
 
-                <span class="tag" id="warning-count">0 καταχωρίσεις</span>
+                <span class="tag" id="warning-count">0 entries</span>
             </div>
 
             <div class="table-wrap">
                 <table>
                     <thead>
                     <tr>
-                        <th>Ώρα</th>
-                        <th>Αεροσκάφη</th>
-                        <th>Απόσταση</th>
+                        <th>Time</th>
+                        <th>Aircraft</th>
+                        <th>Distance</th>
                     </tr>
                     </thead>
 
                     <tbody id="warnings-body">
                         <tr>
                             <td colspan="3" class="empty-message">
-                                Φόρτωση προειδοποιήσεων...
+                                Loading warnings...
                             </td>
                         </tr>
                     </tbody>
@@ -842,10 +792,10 @@ def dashboard():
     </section>
 
 
-    <!-- Υποσέλιδο με πληροφορίες ενημέρωσης. -->
+    <!-- Footer with update information. -->
     <footer class="footer">
-        <span>AirTrafficSim · Σύστημα προσομοίωσης εναέριας κυκλοφορίας</span>
-        <span id="last-update">Τελευταία ενημέρωση: —</span>
+        <span>AirTrafficSim - Air traffic simulation system</span>
+        <span id="last-update">Last update: -</span>
     </footer>
 
 </div>
@@ -853,33 +803,33 @@ def dashboard():
 
 <script>
     // ========================================================
-    // JAVASCRIPT — ΔΥΝΑΜΙΚΗ ΛΕΙΤΟΥΡΓΙΑ ΤΟΥ DASHBOARD
+    // JAVASCRIPT - DASHBOARD BEHAVIOR
     // ========================================================
 
-    // Ανακτούμε το στοιχείο Canvas, όπου σχεδιάζεται ο χάρτης.
+    // Get the canvas element on which the map is drawn.
     const canvas = document.getElementById("airspace-canvas");
 
-    // Το context 2D περιέχει τις εντολές σχεδίασης.
+    // The 2D context provides the drawing commands.
     const ctx = canvas.getContext("2d");
 
 
     // --------------------------------------------------------
-    // 1. Σχεδίαση φόντου και πλέγματος του χάρτη
+    // 1. Draw the map background and grid
     // --------------------------------------------------------
     function drawGrid() {
 
-        // Καθαρίζουμε την προηγούμενη εικόνα.
+        // Clear the previous frame.
         ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-        // Δημιουργούμε ένα σκούρο φόντο.
+        // Fill the dark background.
         ctx.fillStyle = "#0a1422";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-        // Ρυθμίζουμε τις γραμμές του πλέγματος.
+        // Configure the grid lines.
         ctx.strokeStyle = "#1b2b40";
         ctx.lineWidth = 1;
 
-        // Σχεδιάζουμε τις κάθετες γραμμές.
+        // Draw the vertical lines.
         for (let x = 0; x <= canvas.width; x += 55) {
             ctx.beginPath();
             ctx.moveTo(x, 0);
@@ -887,7 +837,7 @@ def dashboard():
             ctx.stroke();
         }
 
-        // Σχεδιάζουμε τις οριζόντιες γραμμές.
+        // Draw the horizontal lines.
         for (let y = 0; y <= canvas.height; y += 55) {
             ctx.beginPath();
             ctx.moveTo(0, y);
@@ -895,21 +845,21 @@ def dashboard():
             ctx.stroke();
         }
 
-        // Προσθέτουμε διακριτικές ετικέτες στους άξονες.
+        // Add subtle axis labels.
         ctx.fillStyle = "#8295af";
         ctx.font = "12px Segoe UI, Arial";
-        ctx.fillText("X →", canvas.width - 42, canvas.height - 12);
-        ctx.fillText("Y ↑", 12, 18);
+        ctx.fillText("X >", canvas.width - 42, canvas.height - 12);
+        ctx.fillText("Y ^", 12, 18);
     }
 
 
     // --------------------------------------------------------
-    // 2. Δημιουργία συνόλου με τα αεροσκάφη σε ενεργό κίνδυνο
+    // 2. Build the set of aircraft currently in danger
     // --------------------------------------------------------
     function getDangerousAircraft(conflicts) {
 
-        // Το Set κρατά κάθε ID μόνο μία φορά, ακόμη κι αν
-        // το ίδιο αεροσκάφος συμμετέχει σε πολλά περιστατικά.
+        // A Set stores each ID only once, even if the same
+        // aircraft is part of several conflicts.
         const dangerous = new Set();
 
         for (const conflict of conflicts) {
@@ -922,26 +872,25 @@ def dashboard():
 
 
     // --------------------------------------------------------
-    // 3. Σχεδίαση συμβόλου αεροσκάφους
+    // 3. Draw an aircraft symbol
     // --------------------------------------------------------
     function drawPlane(px, py, heading, color) {
 
-        // Αποθηκεύουμε τις ρυθμίσεις σχεδίασης πριν από
-        // την περιστροφή, ώστε να μην επηρεαστούν άλλα στοιχεία.
+        // Save the drawing state before rotating, so other
+        // elements are not affected.
         ctx.save();
 
-        // Μεταφέρουμε το σημείο σχεδίασης στη θέση του αεροσκάφους.
+        // Move the drawing origin to the aircraft position.
         ctx.translate(px, py);
 
-        // Το heading είναι σε μοίρες, ενώ το Canvas
-        // απαιτεί γωνία σε ακτίνια.
+        // The heading is in degrees, while the canvas expects radians.
         const angle = Number(heading) * Math.PI / 180;
 
-        // Περιστρέφουμε το αεροσκάφος σύμφωνα με την πορεία.
+        // Rotate the symbol according to the heading.
         ctx.rotate(angle);
 
-        // Σχηματίζουμε ένα απλό σύμβολο αεροσκάφους.
-        // Η μύτη του αρχικού σχήματος δείχνει προς τα πάνω.
+        // Draw a simple aircraft shape.
+        // The nose of the original shape points upwards.
         ctx.beginPath();
         ctx.moveTo(0, -13);
         ctx.lineTo(3, -3);
@@ -961,45 +910,43 @@ def dashboard():
         ctx.lineTo(-3, -3);
         ctx.closePath();
 
-        // Χρωματίζουμε το αεροσκάφος ανάλογα με την κατάστασή του.
+        // Fill the aircraft according to its status.
         ctx.fillStyle = color;
         ctx.fill();
 
-        // Προσθέτουμε λεπτό περίγραμμα για καλύτερη αντίθεση.
+        // Add a thin outline for better contrast.
         ctx.strokeStyle = "#f8fafc";
         ctx.lineWidth = 1;
         ctx.stroke();
 
-        // Επαναφέρουμε τις αρχικές ρυθμίσεις του Canvas.
+        // Restore the original canvas state.
         ctx.restore();
     }
 
 
     // --------------------------------------------------------
-    // 4. Σχεδίαση όλων των αεροσκαφών στον χάρτη
+    // 4. Draw all aircraft on the map
     // --------------------------------------------------------
     function drawAircraft(aircraft, conflicts) {
 
-        // Ξεκινάμε με καθαρό πλέγμα.
+        // Start from a clean grid.
         drawGrid();
 
-        // Δημιουργούμε το σύνολο των αεροσκαφών που κινδυνεύουν.
+        // Set of aircraft currently in danger.
         const dangerous = getDangerousAircraft(conflicts);
 
-        // Υπολογίζουμε τα όρια των θέσεων για δυναμική κλίμακα.
+        // Compute position bounds for a dynamic scale.
         const xs = aircraft.map(p => Number(p.x));
         const ys = aircraft.map(p => Number(p.y));
 
-        // Εξασφαλίζουμε ότι ο χάρτης καλύπτει τουλάχιστον
-        // το εύρος 0 έως 100, ακόμη κι αν όλα τα αεροσκάφη
-        // βρίσκονται σε μικρότερη περιοχή.
+        // Make sure the map covers at least the range 0 to 100,
+        // even if all aircraft are inside a smaller area.
         const minX = Math.min(0, ...xs);
         const maxX = Math.max(100, ...xs);
         const minY = Math.min(0, ...ys);
         const maxY = Math.max(100, ...ys);
 
-        // Αφήνουμε περιθώριο στα άκρα για να μη βγαίνουν
-        // τα σύμβολα έξω από τον χάρτη.
+        // Margin around the edges so symbols stay on the map.
         const padding = 35;
 
         const usableWidth = canvas.width - 2 * padding;
@@ -1008,25 +955,24 @@ def dashboard():
         const scaleX = usableWidth / Math.max(1, maxX - minX);
         const scaleY = usableHeight / Math.max(1, maxY - minY);
 
-        // Σχεδιάζουμε κάθε αεροσκάφος.
+        // Draw each aircraft.
         for (const plane of aircraft) {
 
-            // Μετατροπή της συντεταγμένης X σε εικονοστοιχεία.
+            // Convert the X coordinate to pixels.
             const px = padding + (Number(plane.x) - minX) * scaleX;
 
-            // Ο άξονας Y του Canvas αυξάνεται προς τα κάτω,
-            // οπότε αντιστρέφουμε την κατακόρυφη συντεταγμένη.
+            // The canvas Y axis grows downwards, so the vertical
+            // coordinate is inverted.
             const py = canvas.height - padding -
                       (Number(plane.y) - minY) * scaleY;
 
-            // Ελέγχουμε αν το αεροσκάφος συμμετέχει σε
-            // περιστατικό μικρής απόστασης αυτή τη στιγμή.
+            // Is this aircraft part of a conflict right now?
             const isDangerous = dangerous.has(plane.aircraft_id);
 
-            // Κόκκινο για ενεργό κίνδυνο, πράσινο διαφορετικά.
+            // Red for active danger, green otherwise.
             const color = isDangerous ? "#ff5d73" : "#35d49a";
 
-            // Σχεδιάζουμε τη γραμμή που υποδεικνύει την κατεύθυνση.
+            // Draw the line that indicates the direction of movement.
             const angle = Number(plane.heading) * Math.PI / 180;
             const lineLength = 30;
 
@@ -1041,8 +987,7 @@ def dashboard():
             ctx.lineWidth = 2;
             ctx.stroke();
 
-            // Προσθέτουμε μια διακριτική κυκλική ένδειξη
-            // γύρω από τη θέση του αεροσκάφους.
+            // Draw a subtle circle around the aircraft position.
             ctx.beginPath();
             ctx.arc(px, py, 19, 0, 2 * Math.PI);
             ctx.strokeStyle = isDangerous
@@ -1051,15 +996,15 @@ def dashboard():
             ctx.lineWidth = 1.5;
             ctx.stroke();
 
-            // Σχεδιάζουμε το σύμβολο του αεροσκάφους.
+            // Draw the aircraft symbol.
             drawPlane(px, py, plane.heading, color);
 
-            // Γράφουμε το αναγνωριστικό δίπλα στο σύμβολο.
+            // Write the identifier next to the symbol.
             ctx.fillStyle = "#e8eef8";
             ctx.font = "bold 12px Segoe UI, Arial";
             ctx.fillText(plane.aircraft_id, px + 20, py - 15);
 
-            // Όταν υπάρχει κίνδυνος, προσθέτουμε σχετική ένδειξη.
+            // Add a warning label when the aircraft is in danger.
             if (isDangerous) {
                 ctx.fillStyle = "#ff8494";
                 ctx.font = "bold 10px Segoe UI, Arial";
@@ -1070,62 +1015,60 @@ def dashboard():
 
 
     // --------------------------------------------------------
-    // 5. Ενημέρωση των καρτών στατιστικών
+    // 5. Update the statistics cards
     // --------------------------------------------------------
     function updateStatistics(aircraft, conflicts) {
 
-        // Συγκεντρώνουμε τα IDs όλων των αεροσκαφών
-        // που συμμετέχουν σε ενεργά περιστατικά.
+        // IDs of all aircraft involved in active conflicts.
         const dangerous = getDangerousAircraft(conflicts);
 
-        // Συνολικός αριθμός αεροσκαφών.
+        // Total number of aircraft.
         document.getElementById("total-aircraft").textContent =
             aircraft.length;
 
-        // Αριθμός αεροσκαφών χωρίς ενεργό περιστατικό.
+        // Aircraft without an active conflict.
         document.getElementById("safe-aircraft").textContent =
             aircraft.length - dangerous.size;
 
-        // Αριθμός διαφορετικών αεροσκαφών που βρίσκονται σε κίνδυνο.
+        // Number of distinct aircraft in danger.
         document.getElementById("danger-aircraft").textContent =
             dangerous.size;
 
-        // Αριθμός ζευγών που βρίσκονται κάτω από το όριο απόστασης.
+        // Number of pairs below the distance limit.
         document.getElementById("active-conflicts").textContent =
             conflicts.length;
 
-        // Εμφανίζουμε και το όριο ασφαλείας που χρησιμοποιεί
-        // η εφαρμογή στον υπολογισμό των αποστάσεων.
+        // Show the safety limit used for the distance calculation.
         document.getElementById("distance-limit").textContent =
             Number(MIN_DISTANCE_JS).toFixed(1);
     }
 
 
     // --------------------------------------------------------
-    // 6. Ενημέρωση πίνακα πτήσεων
+    // 6. Update the flight table
     // --------------------------------------------------------
     function updateAircraftTable(aircraft, conflicts) {
 
         const tbody = document.getElementById("aircraft-body");
 
-        // Αφαιρούμε τις παλιές γραμμές.
+        // Remove the old rows.
         tbody.replaceChildren();
 
-        // Εντοπίζουμε τα αεροσκάφη που συμμετέχουν σε κίνδυνο.
+        // Aircraft currently involved in a conflict.
         const dangerous = getDangerousAircraft(conflicts);
 
-        // Ενημερώνουμε τον αριθμό των εμφανιζόμενων πτήσεων.
+        // Update the displayed flight count.
         document.getElementById("flight-count").textContent =
-            aircraft.length + " πτήσεις";
+            aircraft.length + " flights";
 
-        // Εμφανίζουμε μήνυμα όταν η βάση δεν περιέχει αεροσκάφη.
+        // Show a message when the database has no aircraft.
         if (aircraft.length === 0) {
             const row = document.createElement("tr");
             const cell = document.createElement("td");
 
             cell.colSpan = 9;
             cell.className = "empty-message";
-            cell.textContent = "Δεν υπάρχουν καταχωρισμένα αεροσκάφη.";
+            cell.textContent = "No aircraft are registered.";
 
             row.appendChild(cell);
             tbody.appendChild(row);
@@ -1137,36 +1080,34 @@ def dashboard():
             const isDangerous = dangerous.has(plane.aircraft_id);
             const row = document.createElement("tr");
 
-            // Δημιουργούμε τα κελιά της γραμμής.
-            // Οι συντεταγμένες εμφανίζονται με δύο δεκαδικά ψηφία.
-            
+            // Values of the row cells.
+            // Coordinates are shown with two decimal places.
             const values = [
                 plane.aircraft_id,
-                plane.manufacturer || "—",
-                plane.origin || "—",
-                plane.destination || "—",
-                String(plane.origin || "—") + " → " +
-                    String(plane.destination || "—"),
+                plane.manufacturer || "-",
+                plane.origin || "-",
+                plane.destination || "-",
+                String(plane.origin || "-") + " > " +
+                    String(plane.destination || "-"),
                 Number(plane.x).toFixed(2) + " / " +
                     Number(plane.y).toFixed(2),
                 Number(plane.speed).toFixed(2),
-                Number(plane.heading).toFixed(0) + "°"
+                Number(plane.heading).toFixed(0) + "\u00B0"
             ];
-
 
             for (let i = 0; i < values.length; i++) {
                 const cell = document.createElement("td");
 
-                // Χρησιμοποιούμε textContent ώστε οι τιμές
-                // να εμφανίζονται ως κείμενο και όχι ως HTML.
+                // Use textContent so values are displayed as
+                // plain text and never interpreted as HTML.
                 cell.textContent = values[i];
 
-                // Ξεχωρίζουμε οπτικά το αναγνωριστικό.
+                // Visually distinguish the identifier.
                 if (i === 0) {
                     cell.className = "plane-id";
                 }
 
-                // Ξεχωρίζουμε τη διαδρομή από τα αριθμητικά δεδομένα.
+                // Distinguish the route from the numeric data.
                 if (i === 4) {
                     cell.className = "route";
                 }
@@ -1174,7 +1115,7 @@ def dashboard():
                 row.appendChild(cell);
             }
 
-            // Δημιουργούμε το κελί της κατάστασης.
+            // Build the status cell.
             const statusCell = document.createElement("td");
             const pill = document.createElement("span");
 
@@ -1182,9 +1123,7 @@ def dashboard():
                 ? "status-pill status-danger"
                 : "status-pill status-safe";
 
-            pill.textContent = isDangerous
-                ? "⚠ ΚΙΝΔΥΝΟΣ"
-                : "✓ ΚΑΝΟΝΙΚΟ";
+            pill.textContent = isDangerous ? "DANGER" : "NORMAL";
 
             statusCell.appendChild(pill);
             row.appendChild(statusCell);
@@ -1195,27 +1134,27 @@ def dashboard():
 
 
     // --------------------------------------------------------
-    // 7. Ενημέρωση ιστορικού προειδοποιήσεων
+    // 7. Update the warning history table
     // --------------------------------------------------------
     function updateWarningsTable(warnings) {
 
         const tbody = document.getElementById("warnings-body");
 
-        // Αδειάζουμε τον πίνακα πριν προσθέσουμε τις νέες εγγραφές.
+        // Empty the table before adding the new entries.
         tbody.replaceChildren();
 
-        // Ενημερώνουμε το πλήθος των προειδοποιήσεων που εμφανίζονται.
+        // Update the number of displayed warnings.
         document.getElementById("warning-count").textContent =
-            warnings.length + " καταχωρίσεις";
+            warnings.length + " entries";
 
-        // Εμφανίζουμε σχετικό μήνυμα όταν δεν υπάρχουν προειδοποιήσεις.
+        // Show a message when there are no warnings.
         if (warnings.length === 0) {
             const row = document.createElement("tr");
             const cell = document.createElement("td");
 
             cell.colSpan = 3;
             cell.className = "empty-message";
-            cell.textContent = "Δεν υπάρχουν καταγεγραμμένες προειδοποιήσεις.";
+            cell.textContent = "No warnings have been recorded.";
 
             row.appendChild(cell);
             tbody.appendChild(row);
@@ -1226,13 +1165,13 @@ def dashboard():
 
             const row = document.createElement("tr");
 
-            // Παίρνουμε μόνο την ώρα για πιο συμπαγή εμφάνιση.
-            const timestamp = String(warning.timestamp || "—");
+            // Keep only the time part for a more compact display.
+            const timestamp = String(warning.timestamp || "-");
             const time = timestamp.length >= 19
                 ? timestamp.substring(11, 19)
                 : timestamp;
 
-            // Δημιουργούμε τρία κελιά: ώρα, ζεύγος, απόσταση.
+            // Three cells: time, aircraft pair, distance.
             const timeCell = document.createElement("td");
             timeCell.textContent = time;
             timeCell.className = "route";
@@ -1256,15 +1195,14 @@ def dashboard():
 
 
     // --------------------------------------------------------
-    // 8. Ενημέρωση ένδειξης σύνδεσης
+    // 8. Update the connection indicator
     // --------------------------------------------------------
     function setConnectionStatus(isOnline, message) {
 
         const connection = document.getElementById("connection");
         const connectionText = document.getElementById("connection-text");
 
-        // Αλλάζουμε την κλάση CSS για να αλλάξει το χρώμα
-        // της ένδειξης σύνδεσης.
+        // Toggle the CSS classes that control the indicator color.
         connection.classList.toggle("online", isOnline);
         connection.classList.toggle("offline", !isOnline);
 
@@ -1273,35 +1211,35 @@ def dashboard():
 
 
     // --------------------------------------------------------
-    // 9. Κύρια συνάρτηση ανανέωσης
+    // 9. Main refresh function
     // --------------------------------------------------------
     async function refreshDashboard() {
 
         try {
 
-            // Ζητάμε από το Flask τα πιο πρόσφατα δεδομένα.
+            // Ask Flask for the latest data.
             const response = await fetch("/api/state", {
                 cache: "no-store"
             });
 
-            // Αν ο server επέστρεψε σφάλμα, σταματάμε την ενημέρωση.
+            // If the server returned an error, stop the update.
             if (!response.ok) {
                 throw new Error("HTTP " + response.status);
             }
 
-            // Μετατρέπουμε το JSON σε αντικείμενο JavaScript.
+            // Convert the JSON response to a JavaScript object.
             const data = await response.json();
 
-            // Αν το API έστειλε μήνυμα σφάλματος, το εμφανίζουμε.
+            // If the API reported an error, surface it.
             if (data.error) {
                 throw new Error(data.error);
             }
 
-            // Αποθηκεύουμε το όριο που χρησιμοποιεί ο server
-            // ώστε να εμφανίζεται σωστά στις κάρτες στατιστικών.
+            // Store the limit used by the server so it is shown
+            // correctly in the statistics cards.
             MIN_DISTANCE_JS = Number(data.min_distance);
 
-            // Ανανεώνουμε όλα τα στοιχεία της σελίδας.
+            // Refresh every element of the page.
             drawAircraft(data.aircraft, data.conflicts);
 
             updateStatistics(data.aircraft, data.conflicts);
@@ -1310,37 +1248,37 @@ def dashboard():
 
             updateWarningsTable(data.warnings);
 
-            // Δηλώνουμε ότι η σύνδεση με το API λειτουργεί.
-            setConnectionStatus(true, "Σύνδεση ενεργή");
+            // Report that the API connection is working.
+            setConnectionStatus(true, "Connection active");
 
-            // Εμφανίζουμε την τοπική ώρα τελευταίας ενημέρωσης.
+            // Show the local time of the last update.
             document.getElementById("last-update").textContent =
-                "Τελευταία ενημέρωση: " +
-                new Date().toLocaleTimeString("el-GR");
+                "Last update: " +
+                new Date().toLocaleTimeString("en-GB");
 
         } catch (error) {
 
-            // Αν αποτύχει η σύνδεση ή η ανάγνωση δεδομένων,
-            // εμφανίζουμε καθαρό μήνυμα στην κεφαλίδα.
-            setConnectionStatus(false, "Σφάλμα σύνδεσης");
+            // If the connection or data read fails, show a
+            // clear message in the header.
+            setConnectionStatus(false, "Connection error");
 
-            console.error("Σφάλμα ανανέωσης dashboard:", error);
+            console.error("Dashboard refresh error:", error);
         }
     }
 
 
     // --------------------------------------------------------
-    // 10. Έναρξη της αυτόματης ανανέωσης
+    // 10. Start the automatic refresh
     // --------------------------------------------------------
 
-    // Αρχική τιμή του ορίου ασφαλείας. Θα αντικατασταθεί
-    // από την τιμή που επιστρέφει ο server στο πρώτο API call.
+    // Initial value of the safety limit. It is replaced by the
+    // value returned by the server on the first API call.
     let MIN_DISTANCE_JS = 10.0;
 
-    // Κάνουμε μία ανανέωση αμέσως με το άνοιγμα της σελίδας.
+    // Refresh once immediately when the page opens.
     refreshDashboard();
 
-    // Επαναλαμβάνουμε την ανανέωση ανά δύο δευτερόλεπτα.
+    // Repeat the refresh every two seconds.
     setInterval(refreshDashboard, 2000);
 
 </script>
@@ -1351,12 +1289,12 @@ def dashboard():
 
 
 # ------------------------------------------------
-# 7. Εκκίνηση του τοπικού web server
+# 7. Start the local web server
 # ------------------------------------------------
 if __name__ == "__main__":
 
-    # Ακούμε μόνο στον τοπικό υπολογιστή.
-    # Η ρύθμιση αυτή δεν εκθέτει το dashboard στο δίκτυο.
+    # Listen on the local machine only.
+    # This setting does not expose the dashboard to the network.
     app.run(
         host="127.0.0.1",
         port=5001,

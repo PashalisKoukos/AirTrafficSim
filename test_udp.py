@@ -1,29 +1,34 @@
+# ---------------------------------------------------------
+# test_udp.py
+# Manual test helper: sends one UDP position packet to the server.
+#
+# The packet is intentionally NOT signed, so the server should
+# reject it with an HMAC failure. This verifies that message
+# authentication is enforced.
+# ---------------------------------------------------------
 
 import socket
 import json
 
-# Εισάγουμε τη συνάρτηση που διαβάζει στοιχεία αεροσκάφους
-# από τη βάση δεδομένων SQLite.
+# Function that reads aircraft data from the SQLite database.
 from dataBase import get_aircraft
 
 
-# Διεύθυνση IP και θύρα στην οποία ακούει ο UDP server.
+# IP address and port the UDP server listens on.
 SERVER_IP = "127.0.0.1"
 SERVER_PORT = 5000
 
-# Διαβάζουμε τα τρέχοντα στοιχεία του δεύτερου αεροσκάφους.
-# Θα χρησιμοποιήσουμε τη θέση του για να τοποθετήσουμε
-# το πρώτο αεροσκάφος ακριβώς στο ίδιο σημείο.
+# Read the current data of the second aircraft. Its position is
+# used to place the first aircraft at exactly the same point.
 aircraft_b = get_aircraft("AC002")
 
-# Ελέγχουμε ότι το αεροσκάφος υπάρχει στη βάση.
+# Make sure the aircraft exists in the database.
 if aircraft_b is None:
-    print("Σφάλμα: Το AC002 δεν βρέθηκε στη βάση δεδομένων.")
+    print("Error: AC002 was not found in the database.")
 
 else:
-    # Δημιουργούμε ένα μήνυμα θέσης για το AC001.
-    # Οι συντεταγμένες είναι ίδιες με εκείνες του AC002,
-    # επομένως η απόσταση των δύο αεροσκαφών θα είναι μηδέν.
+    # Build a position message for AC001. The coordinates equal
+    # those of AC002, so the distance between them would be zero.
     message = {
         "type": "POSITION",
         "aircraft_id": "AC001",
@@ -34,15 +39,13 @@ else:
         "heading": 90.0
     }
 
-    # Μετατρέπουμε το λεξικό σε JSON και έπειτα σε bytes,
-    # επειδή τα UDP datagrams μεταφέρουν δεδομένα ως bytes.
+    # UDP carries raw bytes, so serialize the dict to JSON
+    # and encode it as UTF-8.
     data = json.dumps(message).encode("utf-8")
 
-    # Δημιουργούμε UDP socket για την αποστολή του μηνύματος.
+    # Create a UDP socket and send the datagram to the server.
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-
-        # Στέλνουμε το μήνυμα στον server.
         sock.sendto(data, (SERVER_IP, SERVER_PORT))
 
-    # Ενημερώνουμε τον χρήστη ότι το πακέτο στάλθηκε.
-    print("Στάλθηκε δοκιμαστική θέση του AC001:", message)
+    # Inform the user that the packet was sent.
+    print("Sent test position for AC001:", message)

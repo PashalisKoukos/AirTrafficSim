@@ -1,133 +1,121 @@
-
 # ---------------------------------------------------------
 # aircraft.py
-# Προσομοίωση κίνησης αεροσκαφών και επικοινωνίας μέσω UDP.
-# Κάθε μήνυμα θέσης προστατεύεται με HMAC-SHA-256.
+# Simulates aircraft movement and UDP communication.
+# Every position message is protected with HMAC-SHA-256.
 # ---------------------------------------------------------
 
-# Η math χρησιμοποιείται για τους τριγωνομετρικούς υπολογισμούς.
+import json
 import math
-
-# Η time επιτρέπει να μεσολαβεί ένα δευτερόλεπτο
-# ανάμεσα στις ενημερώσεις θέσης.
+import socket
 import time
 
-# Η socket παρέχει την επικοινωνία μέσω UDP.
-import socket
-
-import math
-from security import create_hmac, verify_hmac
-
-# Η json μετατρέπει τα μηνύματα σε μορφή JSON.
-import json
-
-# Εισάγουμε συναρτήσεις για τη δημιουργία της βάσης
-# και την ανάγνωση των αρχικών στοιχείων των αεροσκαφών.
+# Database helpers: create the database and read the initial
+# aircraft data.
 from dataBase import (
     create_database,
     insert_initial_aircraft,
     get_aircraft
 )
 
-# Εισάγουμε τη συνάρτηση δημιουργίας ψηφιακής υπογραφής HMAC.
-from security import create_hmac
+# HMAC helpers for signing outgoing and verifying incoming messages.
+from security import create_hmac, verify_hmac
 
 
-# Διεύθυνση IP του server.
+# IP address of the server.
 HOST = "127.0.0.1"
 
-# Θύρα στην οποία στέλνουμε τις ενημερώσεις θέσης.
+# Port to which position updates are sent.
 PORT = 5000
 
-# Θύρα στην οποία περιμένουμε εντολές αλλαγής πορείας.
+# Port on which heading commands are received.
 COMMAND_PORT = 5002
 
-# Όρια της περιοχής στην οποία κινούνται τα αεροσκάφη.
+# Boundaries of the airspace in which the aircraft move.
 MIN_COORDINATE = 0.0
 MAX_COORDINATE = 100.0
 
-# Τα αναγνωριστικά των πέντε αεροσκαφών της προσομοίωσης.
+# Identifiers of the five simulated aircraft.
 AIRCRAFT_IDS = ["AC001", "AC002", "AC003", "AC004", "AC005"]
 
 
 def receive_commands(command_socket, aircraft_list):
     """
-    Ελέγχει τις εντολές που λαμβάνονται από τον server.
+    Process commands received from the server.
 
-    Πριν εφαρμοστεί μια εντολή HEADING, επαληθεύεται
-    η υπογραφή HMAC-SHA-256.
+    The HMAC-SHA-256 signature is verified before any HEADING
+    command is applied.
     """
 
-    # Διαβάζουμε όλα τα διαθέσιμα μηνύματα UDP.
+    # Read every message that is currently waiting on the socket.
     while True:
         try:
-            # Παραλαμβάνουμε ένα UDP πακέτο από τον server.
+            # Receive one UDP packet from the server.
             data, address = command_socket.recvfrom(4096)
 
         except BlockingIOError:
-            # Δεν υπάρχουν άλλα μηνύματα αυτή τη στιγμή.
+            # No more messages are available right now.
             break
 
         try:
-            # Μετατρέπουμε τα bytes σε λεξικό Python.
+            # Convert the received bytes into a Python dict.
             command = json.loads(data.decode("utf-8"))
 
-            # Δεχόμαστε μόνο μηνύματα JSON που είναι λεξικά.
+            # Accept only JSON objects.
             if not isinstance(command, dict):
                 continue
 
-            # Διαβάζουμε την υπογραφή που έστειλε ο server.
+            # Read the signature sent by the server.
             received_signature = command.get("hmac")
 
-            # Αν δεν υπάρχει υπογραφή, απορρίπτουμε την εντολή.
+            # Reject commands that carry no signature.
             if not isinstance(received_signature, str):
-                print("Rejected: η εντολή δεν έχει HMAC.")
+                print("Rejected: command has no HMAC.")
                 continue
 
-            # Δημιουργούμε αντίγραφο του μηνύματος για επαλήθευση.
-            # Αφαιρούμε το hmac, επειδή δεν περιλαμβάνεται
-            # στα δεδομένα που υπογράφηκαν αρχικά.
+            # Work on a copy without the hmac field, because the
+            # signature was originally computed without it.
             command_to_verify = command.copy()
             command_to_verify.pop("hmac")
 
-            # Επαληθεύουμε ότι η υπογραφή είναι έγκυρη.
+            # Verify that the signature is valid.
             if not verify_hmac(command_to_verify, received_signature):
-                print("Rejected: αποτυχία επαλήθευσης HMAC.")
+                print("Rejected: HMAC verification failed.")
                 continue
 
-            # Από εδώ και κάτω επεξεργαζόμαστε μόνο
-            # εντολές με έγκυρη υπογραφή.
+            # From here on only correctly signed commands are handled.
             if command.get("type") != "HEADING":
                 continue
 
-            # Διαβάζουμε το ID του αεροσκάφους και τη νέα πορεία.
+            # Read the target aircraft and the requested heading.
             aircraft_id = command.get("aircraft_id")
             heading = command.get("heading")
 
-            # Ελέγχουμε ότι η πορεία είναι έγκυρος αριθμός.
+            # The heading must be a finite number in [0, 360).
+            # Booleans are rejected explicitly because bool is a
+            # subclass of int in Python.
             if (
                 isinstance(heading, bool)
                 or not isinstance(heading, (int, float))
                 or not math.isfinite(heading)
                 or not 0 <= heading < 360
             ):
-                print("Rejected: μη έγκυρη εντολή πορείας.")
+                print("Rejected: invalid heading command.")
                 continue
 
-            # Εντοπίζουμε το αεροσκάφος στο οποίο απευθύνεται η εντολή.
+            # Find the aircraft the command is addressed to.
             for aircraft in aircraft_list:
                 if aircraft["aircraft_id"] == aircraft_id:
 
-                    # Εφαρμόζουμε τη νέα πορεία στην προσομοίωση.
+                    # Apply the new heading to the simulation.
                     aircraft["heading"] = float(heading)
 
-                    # Εμφανίζουμε την επιτυχημένη αλλαγή.
+                    # Report the successful change.
                     print(
-                        f"ΝΕΑ ΠΟΡΕΙΑ: {aircraft_id} -> "
+                        f"NEW HEADING: {aircraft_id} -> "
                         f"{float(heading):.1f}° (HMAC=OK)"
                     )
 
-                    # Δεν χρειάζεται να ελέγξουμε άλλα αεροσκάφη.
+                    # No need to check the remaining aircraft.
                     break
 
         except (
@@ -136,29 +124,30 @@ def receive_commands(command_socket, aircraft_list):
             ValueError,
             TypeError
         ):
-            # Αν το μήνυμα δεν είναι έγκυρο, το απορρίπτουμε.
-            print(f"Αγνοήθηκε μη έγκυρο μήνυμα από {address}.")
+            # Discard messages that cannot be parsed.
+            print(f"Ignored invalid message from {address}.")
+
 
 def run_simulation():
-    # Βεβαιωνόμαστε ότι υπάρχει η βάση δεδομένων.
-    create_database()
+    """Run the aircraft simulation until it is interrupted."""
 
-    # Βεβαιωνόμαστε ότι υπάρχουν οι αρχικές εγγραφές των αεροσκαφών.
+    # Make sure the database and the initial records exist.
+    create_database()
     insert_initial_aircraft()
 
-    # Αποθηκεύουμε προσωρινά στη μνήμη τα αεροσκάφη που θα κινούνται.
+    # In-memory list of the aircraft that will be moved.
     aircraft_list = []
 
-    # Διαβάζουμε τα αρχικά στοιχεία κάθε αεροσκάφους από τη βάση.
+    # Load the initial state of each aircraft from the database.
     for aircraft_id in AIRCRAFT_IDS:
         aircraft = get_aircraft(aircraft_id)
 
-        # Αν δεν υπάρχει το αεροσκάφος στη βάση, το παραλείπουμε.
+        # Skip aircraft that are missing from the database.
         if aircraft is None:
             print(f"Aircraft {aircraft_id} not found.")
             continue
 
-        # Αντιγράφουμε τα δεδομένα σε λεξικό που θα ενημερώνεται στη μνήμη.
+        # Copy the data into a dict that is updated in memory.
         aircraft_list.append({
             "aircraft_id": aircraft["aircraft_id"],
             "x": float(aircraft["x"]),
@@ -166,96 +155,95 @@ def run_simulation():
             "speed": float(aircraft["speed"]),
             "heading": float(aircraft["heading"]),
 
-            # Κάθε αεροσκάφος έχει δική του αύξουσα αρίθμηση μηνυμάτων.
+            # Each aircraft has its own increasing message counter.
             "seq": 0
         })
 
-    # Δημιουργούμε το socket αποστολής ενημερώσεων θέσης.
+    # Socket used to send position updates.
     client_socket = socket.socket(
         socket.AF_INET,
         socket.SOCK_DGRAM
     )
 
-    # Δημιουργούμε ξεχωριστό socket για την παραλαβή εντολών.
+    # Separate socket used to receive commands.
     command_socket = socket.socket(
         socket.AF_INET,
         socket.SOCK_DGRAM
     )
 
-    # Επιτρέπουμε την επαναχρησιμοποίηση της θύρας
-    # σε περιπτώσεις γρήγορης επανεκκίνησης.
+    # Allow the port to be reused after a quick restart.
     command_socket.setsockopt(
         socket.SOL_SOCKET,
         socket.SO_REUSEADDR,
         1
     )
 
-    # Συνδέουμε το socket εντολών στη θύρα 5002.
+    # Bind the command socket to the command port.
     command_socket.bind((HOST, COMMAND_PORT))
 
-    # Το socket δεν θα περιμένει επ' αόριστον για μια εντολή.
-    # Έτσι η προσομοίωση θα συνεχίζει να κινείται κανονικά.
+    # Non-blocking mode: the socket never waits for a command,
+    # so the simulation keeps moving normally.
     command_socket.setblocking(False)
 
     print("Aircraft simulation started.")
-    print(f"Αποστολή θέσεων στη θύρα {PORT}.")
-    print(f"Αναμονή εντολών στη θύρα {COMMAND_PORT}.")
-    print("Τα μηνύματα θέσης υπογράφονται με HMAC-SHA-256.")
+    print(f"Sending positions to port {PORT}.")
+    print(f"Listening for commands on port {COMMAND_PORT}.")
+    print("Position messages are signed with HMAC-SHA-256.")
     print("Press Ctrl+C to stop.")
 
     try:
-        # Συνεχίζουμε μέχρι ο χρήστης να σταματήσει την προσομοίωση.
+        # Keep running until the user stops the simulation.
         while True:
 
-            # Ελέγχουμε πρώτα αν ο server έστειλε νέες εντολές.
+            # First check whether the server sent new commands.
             receive_commands(command_socket, aircraft_list)
 
-            # Επεξεργαζόμαστε διαδοχικά όλα τα αεροσκάφη.
+            # Process every aircraft in turn.
             for aircraft in aircraft_list:
 
-                # Διαβάζουμε την τρέχουσα θέση, ταχύτητα και πορεία.
+                # Read the current position, speed and heading.
                 x = aircraft["x"]
                 y = aircraft["y"]
                 speed = aircraft["speed"]
                 heading = aircraft["heading"]
 
-                # Μετατρέπουμε την πορεία από μοίρες σε ακτίνια.
+                # Convert the heading from degrees to radians.
                 angle = math.radians(heading)
 
-                # Υπολογίζουμε την επόμενη θέση.
-                # 0° σημαίνει προς +y και 90° προς +x.
+                # Compute the next position.
+                # 0 degrees points to +y and 90 degrees points to +x.
                 new_x = x + speed * math.sin(angle)
                 new_y = y + speed * math.cos(angle)
 
-                # Αν ξεπεραστεί το όριο στον άξονα X,
-                # αλλάζουμε την πορεία ώστε να κινηθούμε προς τα μέσα.
+                # If the X boundary would be crossed, mirror the
+                # heading so the aircraft turns back inside.
                 if new_x < MIN_COORDINATE or new_x > MAX_COORDINATE:
                     heading = (360 - heading) % 360
 
-                    # Υπολογίζουμε ξανά τη θέση με τη νέα πορεία.
+                    # Recompute the position with the new heading.
                     angle = math.radians(heading)
                     new_x = x + speed * math.sin(angle)
                     new_y = y + speed * math.cos(angle)
 
-                # Αν ξεπεραστεί το όριο στον άξονα Y,
-                # αντιστρέφουμε την κατακόρυφη συνιστώσα της κίνησης.
+                # If the Y boundary would be crossed, reverse the
+                # vertical component of the movement.
                 if new_y < MIN_COORDINATE or new_y > MAX_COORDINATE:
                     heading = (180 - heading) % 360
 
-                    # Υπολογίζουμε ξανά τη θέση μετά την αλλαγή πορείας.
+                    # Recompute the position after the heading change.
                     angle = math.radians(heading)
                     new_x = x + speed * math.sin(angle)
                     new_y = y + speed * math.cos(angle)
 
-                # Ενημερώνουμε τη θέση και την πορεία στη μνήμη.
+                # Store the new position and heading in memory.
                 aircraft["x"] = new_x
                 aircraft["y"] = new_y
                 aircraft["heading"] = heading
 
-                # Αυξάνουμε τον αριθμό του μηνύματος.
+                # Increment the message sequence number.
                 aircraft["seq"] += 1
 
-                # Δημιουργούμε το μήνυμα ενημέρωσης θέσης.
+                # Build the position update message.
                 message = {
                     "type": "POSITION",
                     "aircraft_id": aircraft["aircraft_id"],
@@ -266,20 +254,20 @@ def run_simulation():
                     "heading": heading
                 }
 
-                # Υπολογίζουμε την υπογραφή HMAC πάνω στα δεδομένα
-                # του μηνύματος, πριν προσθέσουμε το πεδίο hmac.
+                # Compute the HMAC over the message data, before
+                # the hmac field itself is added.
                 signature = create_hmac(message)
 
-                # Προσθέτουμε την υπογραφή στο μήνυμα.
+                # Attach the signature to the message.
                 message["hmac"] = signature
 
-                # Μετατρέπουμε το πλήρες μήνυμα σε JSON bytes.
+                # Serialize the complete message to JSON bytes.
                 data = json.dumps(message).encode("utf-8")
 
-                # Στέλνουμε την ενημέρωση στον server μέσω UDP.
+                # Send the update to the server over UDP.
                 client_socket.sendto(data, (HOST, PORT))
 
-                # Εμφανίζουμε την αποστολή στην κονσόλα.
+                # Log the transmission to the console.
                 print(
                     f"Sent {aircraft['aircraft_id']}: "
                     f"x={new_x:.2f}, y={new_y:.2f}, "
@@ -287,19 +275,19 @@ def run_simulation():
                     f"seq={aircraft['seq']}, HMAC=OK"
                 )
 
-            # Περιμένουμε ένα δευτερόλεπτο πριν από τον επόμενο κύκλο.
+            # Wait one second before the next cycle.
             time.sleep(1.0)
 
     except KeyboardInterrupt:
-        # Επιτρέπουμε την ομαλή διακοπή με Ctrl+C.
+        # Allow a clean shutdown with Ctrl+C.
         print("\nAircraft simulation stopped.")
 
     finally:
-        # Κλείνουμε και τα δύο sockets κατά τον τερματισμό.
+        # Close both sockets on shutdown.
         client_socket.close()
         command_socket.close()
 
 
-# Εκκινούμε την προσομοίωση μόνο όταν εκτελείται αυτό το αρχείο απευθείας.
+# Start the simulation only when this file is run directly.
 if __name__ == "__main__":
     run_simulation()
